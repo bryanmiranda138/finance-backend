@@ -184,7 +184,7 @@ PREGUNTA ACTUAL DEL USUARIO:
 `;
 
         // 5. Iniciar Chat con Memoria en Gemini
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
         const chat = model.startChat({ history: historialGemini });
 
         const result = await chat.sendMessage(promptUnificado);

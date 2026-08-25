@@ -115,30 +115,55 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Endpoint de Chat Financiero Inteligente
 app.post('/api/chat', verificarAuth, async (req, res) => {
-    const { pregunta } = req.body;
+    const { pregunta, filtroAnio, filtroMes } = req.body;
 
     try {
-        // 1. Obtener el salario neto del usuario desde 'perfiles'
+        // 1. Obtener el perfil del usuario (Salarios Mensuales)
         const { data: perfil } = await supabase
             .from('perfiles')
-            .select('salario_neto')
+            .select('salarios_mensuales')
             .eq('id', req.user.id)
             .single();
 
-        const salarioNeto = perfil?.salario_neto || 0;
-
-        // 2. Obtener los gastos del usuario desde 'gastos'
-        const { data: gastos, error } = await supabase
+        // 2. Obtener TODOS los gastos del usuario
+        const { data: gastosBrutos, error } = await supabase
             .from('gastos')
             .select('fecha, categoria, monto, descripcion')
             .eq('user_id', req.user.id);
 
         if (error) throw error;
 
-        // 3. Estructurar el contexto unificado (Ingresos + Gastos)
+        // 3. Filtrar los gastos EXACTAMENTE como lo hace el frontend
+        const gastosFiltrados = gastosBrutos.filter(g => {
+            if (!g.fecha) return false;
+            const [year, month] = g.fecha.split('-');
+            const coincideAnio = !filtroAnio || year === filtroAnio;
+            const coincideMes = !filtroMes || month === filtroMes;
+            return coincideAnio && coincideMes;
+        });
+
+        // 4. Calcular el Salario Activo según el filtro
+        let salarioActivo = 0;
+        if (perfil && perfil.salarios_mensuales) {
+            if (filtroMes) {
+                // Si hay un mes seleccionado, usamos el salario de ese mes
+                salarioActivo = Number(perfil.salarios_mensuales[filtroMes]) || 0;
+            } else {
+                // Si es histórico completo, sumamos todos los meses configurados
+                salarioActivo = Object.values(perfil.salarios_mensuales).reduce((acc, val) => acc + Number(val), 0);
+            }
+        }
+
+        // 5. Crear el texto de contexto para que la IA entienda qué está mirando
+        let periodoTexto = "Histórico completo (Todos los meses y años)";
+        if (filtroAnio && filtroMes) periodoTexto = `Mes ${filtroMes} del Año ${filtroAnio}`;
+        else if (filtroAnio) periodoTexto = `Todo el Año ${filtroAnio}`;
+        else if (filtroMes) periodoTexto = `Mes ${filtroMes} de todos los años registrados`;
+
         const contextoFinanciero = {
-            salario_neto_mensual: salarioNeto,
-            gastos: gastos
+            periodo_analizado: periodoTexto,
+            salario_neto_del_periodo: salarioActivo,
+            gastos: gastosFiltrados // Pasamos solo los filtrados
         };
 
         const prompt = `
@@ -151,13 +176,15 @@ PREGUNTA DEL USUARIO:
 "${pregunta}"
 
 INSTRUCCIONES:
-- Considera tanto el "salario_neto_mensual" como la lista de "gastos" para realizar tus análisis y recomendaciones.
-- Si el usuario pregunta por su saldo disponible o capacidad de ahorro, resta la suma total de sus gastos a su salario neto mensual.
-- Sé preciso, amable y directo en tus cálculos.
+- El usuario ha filtrado su dashboard y está consultando específicamente por el periodo: ${periodoTexto}.
+- Los datos JSON proporcionados ya están pre-filtrados para ese periodo exacto.
+- Considera tanto el "salario_neto_del_periodo" como la lista de "gastos" para realizar tus análisis y recomendaciones.
+- Si el usuario pregunta por su saldo disponible o capacidad de ahorro en este periodo, resta la suma total de sus gastos al salario neto proporcionado.
+- Sé preciso, amable, conciso y directo en tus cálculos.
     `;
 
-        // 4. Llamar a la API de Gemini (asegúrate de usar el modelo que te funcionó)
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+        // 6. Llamar a la API de Gemini
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
         const respuesta = await result.response.text();
 
@@ -167,6 +194,7 @@ INSTRUCCIONES:
         res.status(500).json({ error: 'No se pudo generar la respuesta de la IA' });
     }
 });
+
 // ==========================================
 // RUTAS DE PERFIL / CONFIGURACIÓN
 // ==========================================

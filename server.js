@@ -118,23 +118,24 @@ app.post('/api/chat', verificarAuth, async (req, res) => {
     const { pregunta, filtroAnio, filtroMes } = req.body;
 
     try {
-        // 1. Obtener el perfil del usuario (Salarios Mensuales)
+        // 1. Blindaje: Leer el perfil sin crashear si el usuario es nuevo
         const { data: perfil } = await supabase
             .from('perfiles')
             .select('salarios_mensuales')
             .eq('id', req.user.id)
             .single();
 
-        // 2. Obtener TODOS los gastos del usuario
+        // 2. Blindaje: Asegurar que los gastos sean siempre un arreglo
         const { data: gastosBrutos, error } = await supabase
             .from('gastos')
             .select('fecha, categoria, monto, descripcion')
             .eq('user_id', req.user.id);
 
         if (error) throw error;
+        const listaGastos = gastosBrutos || []; // Si es null, usa un arreglo vacío
 
-        // 3. Filtrar los gastos EXACTAMENTE como lo hace el frontend
-        const gastosFiltrados = gastosBrutos.filter(g => {
+        // 3. Filtrar los gastos
+        const gastosFiltrados = listaGastos.filter(g => {
             if (!g.fecha) return false;
             const [year, month] = g.fecha.split('-');
             const coincideAnio = !filtroAnio || year === filtroAnio;
@@ -142,19 +143,17 @@ app.post('/api/chat', verificarAuth, async (req, res) => {
             return coincideAnio && coincideMes;
         });
 
-        // 4. Calcular el Salario Activo según el filtro
+        // 4. Calcular el Salario Activo
         let salarioActivo = 0;
         if (perfil && perfil.salarios_mensuales) {
             if (filtroMes) {
-                // Si hay un mes seleccionado, usamos el salario de ese mes
                 salarioActivo = Number(perfil.salarios_mensuales[filtroMes]) || 0;
             } else {
-                // Si es histórico completo, sumamos todos los meses configurados
                 salarioActivo = Object.values(perfil.salarios_mensuales).reduce((acc, val) => acc + Number(val), 0);
             }
         }
 
-        // 5. Crear el texto de contexto para que la IA entienda qué está mirando
+        // 5. Crear contexto
         let periodoTexto = "Histórico completo (Todos los meses y años)";
         if (filtroAnio && filtroMes) periodoTexto = `Mes ${filtroMes} del Año ${filtroAnio}`;
         else if (filtroAnio) periodoTexto = `Todo el Año ${filtroAnio}`;
@@ -163,35 +162,33 @@ app.post('/api/chat', verificarAuth, async (req, res) => {
         const contextoFinanciero = {
             periodo_analizado: periodoTexto,
             salario_neto_del_periodo: salarioActivo,
-            gastos: gastosFiltrados // Pasamos solo los filtrados
+            gastos: gastosFiltrados
         };
 
         const prompt = `
-Eres un asesor financiero personal experto. Responde a la duda del usuario basándote EXCLUSIVAMENTE en sus datos reales registrados.
+Eres un asesor financiero personal experto. Responde a la duda del usuario basándote EXCLUSIVAMENTE en sus datos reales.
 
-DATOS FINANCIEROS DEL USUARIO (en formato JSON):
+DATOS FINANCIEROS (JSON):
 ${JSON.stringify(contextoFinanciero, null, 2)}
 
 PREGUNTA DEL USUARIO:
 "${pregunta}"
 
 INSTRUCCIONES:
-- El usuario ha filtrado su dashboard y está consultando específicamente por el periodo: ${periodoTexto}.
-- Los datos JSON proporcionados ya están pre-filtrados para ese periodo exacto.
-- Considera tanto el "salario_neto_del_periodo" como la lista de "gastos" para realizar tus análisis y recomendaciones.
-- Si el usuario pregunta por su saldo disponible o capacidad de ahorro en este periodo, resta la suma total de sus gastos al salario neto proporcionado.
+- El usuario ha filtrado su dashboard por: ${periodoTexto}.
+- Los datos JSON proporcionados ya están pre-filtrados.
 - Sé preciso, amable, conciso y directo en tus cálculos.
     `;
 
-        // 6. Llamar a la API de Gemini
+        // 6. Llamar a Gemini
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
         const respuesta = await result.response.text();
 
         res.json({ respuesta });
     } catch (err) {
-        console.error('Error en /api/chat:', err);
-        res.status(500).json({ error: 'No se pudo generar la respuesta de la IA' });
+        console.error('Error detallado en /api/chat:', err);
+        res.status(500).json({ error: 'Fallo interno en el servidor.' });
     }
 });
 
@@ -199,7 +196,6 @@ INSTRUCCIONES:
 // RUTAS DE PERFIL / CONFIGURACIÓN
 // ==========================================
 
-// OBTENER PERFIL
 // OBTENER PERFIL
 app.get('/api/perfil', verificarAuth, async (req, res) => {
     let { data, error } = await supabase

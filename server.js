@@ -115,26 +115,25 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Endpoint de Chat Financiero Inteligente
 app.post('/api/chat', verificarAuth, async (req, res) => {
-    const { pregunta, filtroAnio, filtroMes } = req.body;
+    const { pregunta, filtroAnio, filtroMes, historial } = req.body;
 
     try {
-        // 1. Blindaje: Leer el perfil sin crashear si el usuario es nuevo
+        // 1. Obtener perfil y gastos
         const { data: perfil } = await supabase
             .from('perfiles')
             .select('salarios_mensuales')
             .eq('id', req.user.id)
             .single();
 
-        // 2. Blindaje: Asegurar que los gastos sean siempre un arreglo
         const { data: gastosBrutos, error } = await supabase
             .from('gastos')
             .select('fecha, categoria, monto, descripcion')
             .eq('user_id', req.user.id);
 
         if (error) throw error;
-        const listaGastos = gastosBrutos || []; // Si es null, usa un arreglo vacío
 
-        // 3. Filtrar los gastos
+        // 2. Filtrar gastos y calcular salario
+        const listaGastos = gastosBrutos || [];
         const gastosFiltrados = listaGastos.filter(g => {
             if (!g.fecha) return false;
             const [year, month] = g.fecha.split('-');
@@ -143,46 +142,52 @@ app.post('/api/chat', verificarAuth, async (req, res) => {
             return coincideAnio && coincideMes;
         });
 
-        // 4. Calcular el Salario Activo
         let salarioActivo = 0;
         if (perfil && perfil.salarios_mensuales) {
-            if (filtroMes) {
-                salarioActivo = Number(perfil.salarios_mensuales[filtroMes]) || 0;
-            } else {
-                salarioActivo = Object.values(perfil.salarios_mensuales).reduce((acc, val) => acc + Number(val), 0);
-            }
+            if (filtroMes) salarioActivo = Number(perfil.salarios_mensuales[filtroMes]) || 0;
+            else salarioActivo = Object.values(perfil.salarios_mensuales).reduce((acc, val) => acc + Number(val), 0);
         }
 
-        // 5. Crear contexto
-        let periodoTexto = "Histórico completo (Todos los meses y años)";
+        let periodoTexto = "Histórico completo";
         if (filtroAnio && filtroMes) periodoTexto = `Mes ${filtroMes} del Año ${filtroAnio}`;
         else if (filtroAnio) periodoTexto = `Todo el Año ${filtroAnio}`;
         else if (filtroMes) periodoTexto = `Mes ${filtroMes} de todos los años registrados`;
 
+        // 3. Formatear el historial para la API de Gemini
+        const historialGemini = (historial || [])
+            // Omitimos el mensaje de saludo inicial para no confundir a la IA
+            .filter(msg => msg.texto && !msg.texto.includes('¡Hola! Soy tu asistente financiero.'))
+            .map(msg => ({
+                role: msg.rol === 'ia' ? 'model' : 'user',
+                parts: [{ text: msg.texto }]
+            }));
+
+        // 4. Crear el super-prompt unificado (Contexto + Pregunta actual)
         const contextoFinanciero = {
             periodo_analizado: periodoTexto,
             salario_neto_del_periodo: salarioActivo,
             gastos: gastosFiltrados
         };
 
-        const prompt = `
-Eres un asesor financiero personal experto. Responde a la duda del usuario basándote EXCLUSIVAMENTE en sus datos reales.
-
-DATOS FINANCIEROS (JSON):
-${JSON.stringify(contextoFinanciero, null, 2)}
-
-PREGUNTA DEL USUARIO:
-"${pregunta}"
+        const promptUnificado = `
+[CONTEXTO FINANCIERO DEL USUARIO ACTUALIZADO]
+Datos actuales filtrados por el usuario (${periodoTexto}):
+${JSON.stringify(contextoFinanciero)}
 
 INSTRUCCIONES:
-- El usuario ha filtrado su dashboard por: ${periodoTexto}.
-- Los datos JSON proporcionados ya están pre-filtrados.
-- Sé preciso, amable, conciso y directo en tus cálculos.
-    `;
+- Responde a la pregunta actual del usuario manteniendo el hilo de la conversación anterior.
+- Basa tus cálculos ÚNICAMENTE en el JSON de contexto financiero provisto arriba.
+- Sé preciso, amable, directo y sin rodeos.
 
-        // 6. Llamar a Gemini
+PREGUNTA ACTUAL DEL USUARIO:
+"${pregunta}"
+`;
+
+        // 5. Iniciar Chat con Memoria en Gemini
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const result = await model.generateContent(prompt);
+        const chat = model.startChat({ history: historialGemini });
+
+        const result = await chat.sendMessage(promptUnificado);
         const respuesta = await result.response.text();
 
         res.json({ respuesta });

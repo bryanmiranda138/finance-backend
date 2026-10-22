@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const helmet = require('helmet'); // O: import helmet from 'helmet';
+app.use(helmet());
 
 const app = express();
 const port = process.env.PORT || 3000;
